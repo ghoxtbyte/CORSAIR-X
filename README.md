@@ -39,7 +39,7 @@
 ## 💻 Usage
 
 ```bash
-python cors_scanner.py [options]
+python corsairx.py [options]
 ```
 
 ## ⚙️ Arguments
@@ -63,23 +63,23 @@ python cors_scanner.py [options]
 ## 💡 Examples
 **1. Basic Scan of a Single Domain:**
 ```bash
-python cors_scanner.py -u https://example.com
+python corsairx.py -u https://example.com
 ```
 **2. Crawl and Scan (Recommended):** This will first crawl example.com for links and then scan all found endpoints.
 ```bash
-python cors_scanner.py -u https://example.com --crawl
+python corsairx.py -u https://example.com --crawl
 ```
 **3. Using Custom Headers (Cookies/Auth):** Note: You can pass multiple headers in one string separated by a semicolon `;`.
 ```bash
-python cors_scanner.py -u https://api.example.com -H "Cookie: session=12345; Authorization: Bearer XYZ"
+python corsairx.py -u https://api.example.com -H "Cookie: session=12345; Authorization: Bearer XYZ"
 ```
 **4. Scanning a List of Domains with Output:**
 ```bash
-python cors_scanner.py -l targets.txt -o vulnerable.txt --concurrency 50
+python corsairx.py -l targets.txt -o vulnerable.txt --concurrency 50
 ```
 **5. Using Proxy (e.g., Burp Suite):**
 ```bash
-python cors_scanner.py -u https://example.com) -p http://127.0.0.1:8080
+python corsairx.py -u https://example.com) -p http://127.0.0.1:8080
 ```
 
 ## 📊 Output Format
