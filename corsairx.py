@@ -5,14 +5,18 @@ import aiohttp
 import argparse
 import re
 import itertools
+import warnings
 from urllib.parse import urlparse, urljoin, urlunparse
 from colorama import Fore, Style, init
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 import aiofiles
 from tqdm.asyncio import tqdm
 
 # Initialize Colorama
 init(autoreset=True)
+
+# --- Suppress XML Parsed as HTML Warning ---
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 # --- Configuration & Constants ---
 DEFAULT_TIMEOUT = 10
@@ -287,15 +291,24 @@ class CORSScanner:
                                                 is_vuln = True
 
                                         if is_vuln:
-                                            if self.args.debug:
-                                                tqdm.write(f"{Fore.RED}[DEBUG] >>> VULNERABILITY CONFIRMED <<<")
+                                            # --- Default is to SKIP if ACAH is present ---
+                                            # Only include if --acah is provided.
                                             
-                                            # Pass ACAH to report function
-                                            await self.report_vulnerability(url, method, origin, acao, acac, acah)
-                                            VULNERABLE_DOMAINS.add(domain)
+                                            if acah and not self.args.acah:
+                                                if self.args.debug:
+                                                    tqdm.write(f"{Fore.MAGENTA}[DEBUG] Ignored vuln due to ACAH presence (Default). Use --acah to include.")
+                                                is_vuln = False # Filtered out
                                             
-                                            # Stop methods loop for this origin
-                                            break 
+                                            if is_vuln:
+                                                if self.args.debug:
+                                                    tqdm.write(f"{Fore.RED}[DEBUG] >>> VULNERABILITY CONFIRMED <<<")
+                                                
+                                                # Pass ACAH to report function
+                                                await self.report_vulnerability(url, method, origin, acao, acac, acah)
+                                                VULNERABLE_DOMAINS.add(domain)
+                                                
+                                                # Stop methods loop for this origin
+                                                break 
                                 
                             except Exception as e:
                                 if self.args.debug:
@@ -455,6 +468,7 @@ async def main():
     scan_group.add_argument('-H', '--custom-header', action='append', help="Custom headers (e.g., 'Cookie: value')")
     scan_group.add_argument('--timeout', type=int, default=DEFAULT_TIMEOUT, help="Request timeout (seconds)")
     scan_group.add_argument('--concurrency', type=int, default=DEFAULT_CONCURRENCY, help="Concurrent requests")
+    scan_group.add_argument('--acah', action='store_true', help="Include vulnerability even if Access-Control-Allow-Headers is present (Default: Skip)")
     
     # Proxy Group
     proxy_group = parser.add_argument_group('Proxy Configuration')
