@@ -195,8 +195,7 @@ class CORSScanner:
             f"{host}.evil.com",
             "null",
             "*",
-            f"{host}evil.com",
-            f"evil.com{host}"
+            f"{host}evil.com"
         ]
         
         # NOTE: Custom origins are handled in scan_url batches, not here.
