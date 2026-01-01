@@ -114,6 +114,40 @@ def is_interesting_asset(url):
     except:
         return False
 
+def is_related_domain(base_url, target_url):
+    """
+    Checks if target_url is the same domain OR a subdomain of base_url.
+    Handles 'www.' stripping to allow jumping from 'www.ex.com' to 'api.ex.com'.
+    """
+    try:
+        base_host = get_domain_from_url(base_url)
+        target_host = get_domain_from_url(target_url)
+        
+        if not base_host or not target_host:
+            return False
+        
+        # Remove ports for cleaner comparison
+        base_d = base_host.split(':')[0].lower()
+        target_d = target_host.split(':')[0].lower()
+        
+        # Strip www. specifically to allow broader scope matching
+        if base_d.startswith("www."):
+            base_d = base_d[4:]
+        if target_d.startswith("www."):
+            target_d = target_d[4:]
+            
+        # 1. Exact Match
+        if base_d == target_d:
+            return True
+        
+        # 2. Subdomain Match (target ends with .base)
+        if target_d.endswith("." + base_d):
+            return True
+            
+        return False
+    except:
+        return False
+
 # --- Core Logic Classes ---
 
 class CORSScanner:
@@ -485,8 +519,8 @@ class Crawler:
                             if self.scanner.args.debug:
                                 tqdm.write(f"{Fore.MAGENTA}[DEBUG] Filtered static asset from Scan Target: {full_url}")
                         else:
-                            # Only crawl/add if same domain to prevent scope creep
-                            if get_domain_from_url(url) == get_domain_from_url(full_url):
+                            # Check if subdomain/FQDN related instead of strict match
+                            if is_related_domain(url, full_url):
                                 normalized = normalize_url(full_url)
                                 links.add(normalized)
             
@@ -500,9 +534,8 @@ class Crawler:
                 
                 for res_set in results:
                     for extracted_url in res_set:
-                        # Ensure extracted URLs from JS also respect domain scope but allow subdomains if needed
-                        # For strictly same domain:
-                        if get_domain_from_url(url) == get_domain_from_url(extracted_url):
+                        # Check if extracted JS link is related (subdomain/FQDN)
+                        if is_related_domain(url, extracted_url):
                             if not is_static_asset(extracted_url):
                                 links.add(normalize_url(extracted_url))
             
