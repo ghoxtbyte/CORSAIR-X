@@ -79,7 +79,7 @@ python corsairx.py -l targets.txt -o vulnerable.txt --concurrency 50
 ```
 **5. Using Proxy (e.g., Burp Suite):**
 ```bash
-python corsairx.py -u https://example.com) -p http://127.0.0.1:8080
+python corsairx.py -u https://example.com -p http://127.0.0.1:8080
 ```
 
 ## 📊 Output Format
