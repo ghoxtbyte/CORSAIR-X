@@ -27,8 +27,8 @@
 
 1.  Clone the repository:
     ```bash
-    git clone https://github.com/ghoxtbyte/CORSAIR-X.git
-    cd CORSAIR-X
+    git clone https://github.com/ghoxtbyte/corsair-x.git
+    cd corsair-x
     ```
 
 2.  Install dependencies:
