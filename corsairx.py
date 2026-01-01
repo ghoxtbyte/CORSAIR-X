@@ -21,6 +21,7 @@ warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 # --- Configuration & Constants ---
 DEFAULT_TIMEOUT = 10
 DEFAULT_CONCURRENCY = 20
+CRAWL_DEPTH = 3  # Depth of recursive crawling
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 
 # Global Sets for Deduplication and Skip Logic
@@ -53,8 +54,9 @@ INTERESTING_ASSETS = {
 # (?::\d+)? to capture optional port numbers
 REGEX_URL = r"https?://[a-zA-Z0-9.-]+(?::\d+)?(?:/[^\s'\"<>]*)?"
 
-# Matches relative paths inside quotes e.g. "/api/v1/user" or 'v1/data'
-REGEX_PATH = r"['\"](\s*/[a-zA-Z0-9_?&=/\-\.]+)\s*['\"]"
+# Matches relative paths inside quotes e.g. "/api/v1/user" or 'v1/data' or './config'
+# Capture paths starting with / or ./ or ../
+REGEX_PATH = r"['\"](\s*(?:/|\.\.?/)[a-zA-Z0-9_?&=/\-\.]+)\s*['\"]"
 
 # --- Utility Functions ---
 
@@ -416,8 +418,14 @@ class Crawler:
                         path = path.strip('"').strip("'")
                         
                         if len(path) > 1 and not " " in path and not "\n" in path:
-                            full_asset_url = urljoin(base_root, path)
-                            extracted.add(full_asset_url)
+                            # Handle relative paths correctly even if they don't start with http
+                            try:
+                                full_asset_url = urljoin(base_root, path)
+                                # Validate the result looks like a URL
+                                if full_asset_url.startswith("http"):
+                                    extracted.add(full_asset_url)
+                            except:
+                                pass
 
             if self.scanner.args.debug and len(extracted) > 0:
                 tqdm.write(f"{Fore.GREEN}[DEBUG] Found {len(extracted)} items in {url}")
@@ -430,6 +438,11 @@ class Crawler:
 
     async def extract_links(self, url):
         links = set()
+        
+        if url in self.visited:
+            return links
+        self.visited.add(url)
+
         current_proxy = self.scanner.get_next_proxy()
         
         if self.scanner.args.debug:
@@ -442,7 +455,7 @@ class Crawler:
                         if self.scanner.args.debug:
                             tqdm.write(f"{Fore.MAGENTA}[DEBUG] Crawl skipped {url}, status {resp.status}")
                         return links
-                    html = await resp.text()
+                    html = await resp.text(errors='ignore')
                     
             soup = BeautifulSoup(html, 'html.parser')
             
@@ -462,6 +475,7 @@ class Crawler:
                 for element in soup.find_all(tag):
                     val = element.get(attr)
                     if val:
+                        # urljoin handles relative paths (e.g. /api/v1) by merging with base URL
                         full_url = urljoin(url, val)
                         
                         if is_interesting_asset(full_url):
@@ -471,6 +485,7 @@ class Crawler:
                             if self.scanner.args.debug:
                                 tqdm.write(f"{Fore.MAGENTA}[DEBUG] Filtered static asset from Scan Target: {full_url}")
                         else:
+                            # Only crawl/add if same domain to prevent scope creep
                             if get_domain_from_url(url) == get_domain_from_url(full_url):
                                 normalized = normalize_url(full_url)
                                 links.add(normalized)
@@ -485,6 +500,8 @@ class Crawler:
                 
                 for res_set in results:
                     for extracted_url in res_set:
+                        # Ensure extracted URLs from JS also respect domain scope but allow subdomains if needed
+                        # For strictly same domain:
                         if get_domain_from_url(url) == get_domain_from_url(extracted_url):
                             if not is_static_asset(extracted_url):
                                 links.add(normalize_url(extracted_url))
@@ -500,23 +517,45 @@ class Crawler:
 
     async def start(self, base_urls):
         if not self.scanner.args.silent:
-            print(f"{Fore.CYAN}[*] Starting Smart Crawler (HTML + JS Analysis)...{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}[*] Starting Deep Recursive Crawler (Max Depth: {CRAWL_DEPTH})...{Style.RESET_ALL}")
         
         all_endpoints = set()
+        # Initialize with base URLs
+        for u in base_urls:
+            all_endpoints.add(normalize_url(u))
         
-        progress = None
-        bar_fmt = "{desc}: {percentage:3.0f}% | {n_fmt}/{total_fmt} pages"
+        current_batch = list(set(base_urls))
+        visited_urls = set()
         
-        if not self.scanner.args.silent or (self.scanner.args.silent and self.scanner.args.verbose):
-             progress = tqdm(total=len(base_urls), desc="Crawling", unit="page", bar_format=bar_fmt)
-
-        for url in base_urls:
-            endpoints = await self.extract_links(url)
-            all_endpoints.add(normalize_url(url))
-            all_endpoints.update(endpoints)
-            if progress: progress.update(1)
+        # Recursive Crawling Logic (BFS)
+        for depth in range(CRAWL_DEPTH):
+            if not current_batch:
+                break
             
-        if progress: progress.close()
+            if not self.scanner.args.silent:
+                 tqdm.write(f"{Fore.YELLOW}[*] Crawling Depth {depth + 1}: Processing {len(current_batch)} URLs...{Style.RESET_ALL}")
+
+            tasks = []
+            for url in current_batch:
+                if url not in visited_urls:
+                    tasks.append(self.extract_links(url))
+                    visited_urls.add(url)
+            
+            if not tasks:
+                break
+                
+            # Run batch
+            results = await asyncio.gather(*tasks)
+            
+            # Collect new links for next batch
+            next_batch = set()
+            for res_links in results:
+                for link in res_links:
+                    all_endpoints.add(link)
+                    if link not in visited_urls:
+                        next_batch.add(link)
+            
+            current_batch = list(next_batch)
 
         if self.scanner.args.output_crawl:
             async with aiofiles.open(self.scanner.args.output_crawl, 'w', encoding='utf-8') as f:
