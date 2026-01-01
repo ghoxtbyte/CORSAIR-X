@@ -49,6 +49,7 @@ python corsairx.py [options]
 | `-u, --url` | Single target URL (e.g., `example.com`). |
 | `-l, --list` | File containing a list of URLs to scan. |
 | `--crawl` | Enable the internal crawler to find more endpoints. |
+| `--acah` | Include vulnerability even if Access-Control-Allow-Headers is present (Default: Skip) |
 | `-H, --custom-header` | Custom headers. Use `;` to separate multiple headers. |
 | `--origins` | Custom payload/origins file (or single string). |
 | `-o, --output` | Save vulnerable URLs to a file. |
