@@ -31,7 +31,7 @@ CRAWLED_URLS = set()
 REPORTED_SIGNATURES = set()
 
 # --- FILTER CONFIGURATION ---
-# Extensions to ignore during crawling (Media, CSS, JS, Fonts, etc.)
+# Extensions to ignore during scanning/crawling output (Media, CSS, Fonts, etc.)
 IGNORED_EXTENSIONS = {
     # Images
     '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.svg', '.ico', '.webp', '.tiff',
@@ -39,10 +39,22 @@ IGNORED_EXTENSIONS = {
     '.mp3', '.mp4', '.avi', '.mov', '.mkv', '.wav', '.flv', '.wmv',
     # Documents/Archives
     '.pdf', '.zip', '.tar', '.gz', '.rar', '.7z', '.doc', '.docx', '.xls', '.xlsx',
-    # Web Assets
-    '.css', '.js', '.map', '.less', '.scss',
+    # Web Assets (We ignore these for CORS scanning, but we might parse JS/CSS in Smart Crawl)
+    '.css', '.map', '.less', '.scss',
     '.woff', '.woff2', '.ttf', '.eot', '.otf'
 }
+
+# Extensions that we specifically want to download and parse for hidden endpoints
+INTERESTING_ASSETS = {
+    '.js', '.json', '.xml', '.txt', '.conf', '.ini', '.config', '.env', '.ts', '.jsx', '.tsx'
+}
+
+
+# (?::\d+)? to capture optional port numbers
+REGEX_URL = r"https?://[a-zA-Z0-9.-]+(?::\d+)?(?:/[^\s'\"<>]*)?"
+
+# Matches relative paths inside quotes e.g. "/api/v1/user" or 'v1/data'
+REGEX_PATH = r"['\"](\s*/[a-zA-Z0-9_?&=/\-\.]+)\s*['\"]"
 
 # --- Utility Functions ---
 
@@ -57,6 +69,7 @@ def print_banner():
                                                          
 {Fore.CYAN}    =====================================================
       CORSAIR-X | Advanced CORS Misconfiguration Scanner
+           Enhanced with Smart JS & Port Analysis
     ====================================================={Style.RESET_ALL}
     """
     print(banner)
@@ -64,6 +77,7 @@ def print_banner():
 def get_domain_from_url(url):
     try:
         parsed = urlparse(url)
+        # netloc includes domain and port (e.g., example.com:8080)
         return parsed.netloc
     except:
         return None
@@ -81,11 +95,20 @@ def normalize_url(url):
         return url
 
 def is_static_asset(url):
-    """Checks if the URL ends with an ignored extension."""
+    """Checks if the URL ends with an ignored extension (for Scanning purposes)."""
     try:
         parsed = urlparse(url)
         path = parsed.path.lower()
         return any(path.endswith(ext) for ext in IGNORED_EXTENSIONS)
+    except:
+        return False
+
+def is_interesting_asset(url):
+    """Checks if the URL is a JS/Config file worth parsing."""
+    try:
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        return any(path.endswith(ext) for ext in INTERESTING_ASSETS)
     except:
         return False
 
@@ -165,6 +188,7 @@ class CORSScanner:
                 schemes_to_try = ['http', 'https']
             else:
                 schemes_to_try = ['https', 'http']
+            # parsed.netloc handles ports automatically (e.g. example.com:8080)
             base_url = parsed.netloc + parsed.path
 
         valid_urls = []
@@ -202,6 +226,8 @@ class CORSScanner:
     def generate_payloads(self, target_url):
         parsed = urlparse(target_url)
         host = parsed.netloc
+        # If port exists (example.com:8080), we strip it for the payload domain
+        # because "example.com:8080.evil.com" is usually invalid, we want "example.com.evil.com"
         if ":" in host: 
             host = host.split(":")[0]
 
@@ -352,7 +378,56 @@ class Crawler:
     def __init__(self, scanner_instance):
         self.scanner = scanner_instance
         self.visited = set()
+        self.processed_assets = set() 
         
+    async def parse_asset_content(self, url):
+        """Fetches and parses JS/JSON/TXT files for hidden endpoints."""
+        if url in self.processed_assets:
+            return set()
+        self.processed_assets.add(url)
+        
+        extracted = set()
+        current_proxy = self.scanner.get_next_proxy()
+        
+        if self.scanner.args.debug:
+            tqdm.write(f"{Fore.YELLOW}[DEBUG] Analyzing Asset: {url}")
+            
+        try:
+            async with aiohttp.ClientSession(timeout=self.scanner.timeout, headers=self.scanner.headers) as session:
+                async with session.get(url, allow_redirects=True, proxy=current_proxy) as resp:
+                    if resp.status != 200:
+                        return extracted
+                    
+                    content = await resp.text(errors='ignore')
+                    
+                    # 1. Regex for Absolute URLs (Now supports Ports!)
+                    found_urls = re.findall(REGEX_URL, content)
+                    for item in found_urls:
+                        if get_domain_from_url(item):
+                            extracted.add(item)
+                            
+                    # 2. Regex for Relative Paths
+                    found_paths = re.findall(REGEX_PATH, content)
+                    base_parsed = urlparse(url)
+                    base_root = f"{base_parsed.scheme}://{base_parsed.netloc}"
+                    
+                    for path in found_paths:
+                        path = path.strip()
+                        path = path.strip('"').strip("'")
+                        
+                        if len(path) > 1 and not " " in path and not "\n" in path:
+                            full_asset_url = urljoin(base_root, path)
+                            extracted.add(full_asset_url)
+
+            if self.scanner.args.debug and len(extracted) > 0:
+                tqdm.write(f"{Fore.GREEN}[DEBUG] Found {len(extracted)} items in {url}")
+
+        except Exception as e:
+            if self.scanner.args.debug:
+                tqdm.write(f"{Fore.RED}[DEBUG] Asset Parse Error {url}: {e}")
+                
+        return extracted
+
     async def extract_links(self, url):
         links = set()
         current_proxy = self.scanner.get_next_proxy()
@@ -376,27 +451,46 @@ class Crawler:
                 'script': 'src',
                 'link': 'href',
                 'iframe': 'src',
-                'form': 'action'
+                'form': 'action',
+                'img': 'src',
+                'source': 'src'
             }
             
+            potential_assets_to_scan = set()
+
             for tag, attr in tags.items():
                 for element in soup.find_all(tag):
                     val = element.get(attr)
                     if val:
                         full_url = urljoin(url, val)
                         
-                        # Filter static assets
+                        if is_interesting_asset(full_url):
+                            potential_assets_to_scan.add(full_url)
+                        
                         if is_static_asset(full_url):
                             if self.scanner.args.debug:
-                                tqdm.write(f"{Fore.MAGENTA}[DEBUG] Filtered static asset: {full_url}")
-                            continue
-                        
-                        if get_domain_from_url(url) == get_domain_from_url(full_url):
-                            normalized = normalize_url(full_url)
-                            links.add(normalized)
+                                tqdm.write(f"{Fore.MAGENTA}[DEBUG] Filtered static asset from Scan Target: {full_url}")
+                        else:
+                            if get_domain_from_url(url) == get_domain_from_url(full_url):
+                                normalized = normalize_url(full_url)
+                                links.add(normalized)
+            
+            # Smart Asset Parsing (Async)
+            if potential_assets_to_scan:
+                if self.scanner.args.debug:
+                    tqdm.write(f"{Fore.CYAN}[DEBUG] Analyzing {len(potential_assets_to_scan)} assets for hidden endpoints...")
+                
+                asset_tasks = [self.parse_asset_content(asset) for asset in potential_assets_to_scan]
+                results = await asyncio.gather(*asset_tasks)
+                
+                for res_set in results:
+                    for extracted_url in res_set:
+                        if get_domain_from_url(url) == get_domain_from_url(extracted_url):
+                            if not is_static_asset(extracted_url):
+                                links.add(normalize_url(extracted_url))
             
             if self.scanner.args.debug:
-                tqdm.write(f"{Fore.CYAN}[DEBUG] Extracted {len(links)} links from {url}")
+                tqdm.write(f"{Fore.CYAN}[DEBUG] Extracted {len(links)} links (total) from {url}")
 
         except Exception as e:
             if self.scanner.args.debug:
@@ -406,7 +500,7 @@ class Crawler:
 
     async def start(self, base_urls):
         if not self.scanner.args.silent:
-            print(f"{Fore.CYAN}[*] Starting Crawler...{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}[*] Starting Smart Crawler (HTML + JS Analysis)...{Style.RESET_ALL}")
         
         all_endpoints = set()
         
@@ -418,8 +512,6 @@ class Crawler:
 
         for url in base_urls:
             endpoints = await self.extract_links(url)
-            # Root url here as well to ensure it's in the list, 
-            # but deduplication handles it later.
             all_endpoints.add(normalize_url(url))
             all_endpoints.update(endpoints)
             if progress: progress.update(1)
@@ -441,20 +533,18 @@ class Crawler:
 async def main():
     parser = argparse.ArgumentParser(description="CORSAIR-X | Advanced CORS Scanner", add_help=False)
     
-    # Groups
     target_group = parser.add_argument_group('Target')
     target_group.add_argument('-u', '--url', help="Single Target URL")
     target_group.add_argument('-l', '--list', help="List of Target URLs (file)")
     
     scan_group = parser.add_argument_group('Scanning Configuration')
-    scan_group.add_argument('--crawl', action='store_true', help="Crawl endpoints from the target(s) source code")
+    scan_group.add_argument('--crawl', action='store_true', help="Crawl endpoints (includes Smart JS/Asset analysis)")
     scan_group.add_argument('--origins', help="Custom origins (string or file path)")
     scan_group.add_argument('-H', '--custom-header', action='append', help="Custom headers (e.g., 'Cookie: value')")
     scan_group.add_argument('--timeout', type=int, default=DEFAULT_TIMEOUT, help="Request timeout (seconds)")
     scan_group.add_argument('--concurrency', type=int, default=DEFAULT_CONCURRENCY, help="Concurrent requests")
     scan_group.add_argument('--acah', action='store_true', help="Include vulnerability even if Access-Control-Allow-Headers is present (Default: Skip)")
     
-    # Proxy Group
     proxy_group = parser.add_argument_group('Proxy Configuration')
     proxy_group.add_argument('-p', '--proxy', help="Single Proxy (e.g., http://127.0.0.1:8080)")
     proxy_group.add_argument('-pf', '--proxy-file', help="File containing list of proxies")
@@ -518,7 +608,6 @@ async def main():
         print(f"{Fore.GREEN}[+] {len(final_targets)} Live targets ready.{Style.RESET_ALL}")
 
     # --- PHASE 1: Scan ROOT Domains ---
-    # We always scan the roots first, before crawling.
     if not args.silent:
         print(f"{Fore.YELLOW}[*] Phase 1: Scanning {len(final_targets)} Root Targets...{Style.RESET_ALL}")
     
@@ -537,11 +626,8 @@ async def main():
     if args.crawl:
         crawler = Crawler(scanner)
         
-        # Start crawling (using the verified roots)
         all_crawled = await crawler.start(final_targets)
         
-        # Filter: Only scan URLs that haven't been scanned in Phase 1
-        # (scanner.scan_url has internal dedup, but we filter here for accurate progress bars)
         new_targets = [u for u in all_crawled if u not in SCANNED_URLS]
         
         if new_targets:
