@@ -30,6 +30,20 @@ CRAWLED_URLS = set()
 # Set to store signatures of reported vulns to prevent duplicates across http/https
 REPORTED_SIGNATURES = set()
 
+# --- FILTER CONFIGURATION ---
+# Extensions to ignore during crawling (Media, CSS, JS, Fonts, etc.)
+IGNORED_EXTENSIONS = {
+    # Images
+    '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.svg', '.ico', '.webp', '.tiff',
+    # Audio/Video
+    '.mp3', '.mp4', '.avi', '.mov', '.mkv', '.wav', '.flv', '.wmv',
+    # Documents/Archives
+    '.pdf', '.zip', '.tar', '.gz', '.rar', '.7z', '.doc', '.docx', '.xls', '.xlsx',
+    # Web Assets
+    '.css', '.js', '.map', '.less', '.scss',
+    '.woff', '.woff2', '.ttf', '.eot', '.otf'
+}
+
 # --- Utility Functions ---
 
 def print_banner():
@@ -66,6 +80,15 @@ def normalize_url(url):
     except:
         return url
 
+def is_static_asset(url):
+    """Checks if the URL ends with an ignored extension."""
+    try:
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        return any(path.endswith(ext) for ext in IGNORED_EXTENSIONS)
+    except:
+        return False
+
 # --- Core Logic Classes ---
 
 class CORSScanner:
@@ -78,8 +101,6 @@ class CORSScanner:
         # Parse custom headers
         if args.custom_header:
             for header_input in args.custom_header:
-                # Split by semicolon to allow multiple headers in one string
-                # Example: "cookie: test=1234; user-agent:Linux"
                 split_headers = header_input.split(";")
                 for h in split_headers:
                     if ":" in h:
@@ -89,7 +110,7 @@ class CORSScanner:
             if self.args.debug:
                 tqdm.write(f"{Fore.BLUE}[DEBUG] Custom Headers Loaded: {self.headers}")
 
-        # Load custom origins if any
+        # Load custom origins
         self.custom_origins = []
         if args.origins:
             try:
@@ -118,21 +139,15 @@ class CORSScanner:
             except Exception as e:
                 print(f"{Fore.RED}[!] Error reading proxy file: {e}")
         
-        # Cycle iterator for round-robin proxy usage
         self.proxy_pool = itertools.cycle(self.proxies) if self.proxies else None
 
     def get_next_proxy(self):
-        """Returns the next proxy from the pool or None if no proxies are set."""
         if self.proxy_pool:
             p = next(self.proxy_pool)
             return p
         return None
 
     async def get_smart_protocols(self, raw_url):
-        """
-        Determines if http, https or both are available.
-        Handles urls without scheme.
-        """
         raw_url = raw_url.strip()
         parsed = urlparse(raw_url)
         
@@ -197,26 +212,18 @@ class CORSScanner:
             "*",
             f"{host}evil.com"
         ]
-        
-        # NOTE: Custom origins are handled in scan_url batches, not here.
         return list(set(payloads))
 
     async def scan_url(self, url, pbar=None):
         domain = get_domain_from_url(url)
         
-        # Optimization: We usually skip if domain is known vulnerable to avoid spam,
-        # BUT we must ensure the custom list is checked.
-        # So we only skip "Default Batch" if vulnerable, but "Custom Batch" runs regardless.
-        
+        # Deduplication check
         if url in SCANNED_URLS:
             if pbar: pbar.update(1)
             return
         SCANNED_URLS.add(url)
 
-        # Batch 1: Default Payloads
         default_origins = self.generate_payloads(url)
-        
-        # Batch 2: Custom Origins (if any)
         scan_batches = [('default', default_origins)]
         
         if self.custom_origins:
@@ -230,14 +237,10 @@ class CORSScanner:
                 
                 for batch_type, origins_list in scan_batches:
                     
-                    # If we found a vuln in this domain using defaults, skip remaining defaults.
                     if batch_type == 'default' and domain in VULNERABLE_DOMAINS:
                         continue
                     
-                    # Custom batch ALWAYS runs.
-                    
                     for origin in origins_list:
-                        # Optimization inside default batch
                         if batch_type == 'default' and domain in VULNERABLE_DOMAINS:
                             break
                             
@@ -259,7 +262,6 @@ class CORSScanner:
                                     
                                     acao = response.headers.get('Access-Control-Allow-Origin', '')
                                     acac = response.headers.get('Access-Control-Allow-Credentials', '').lower()
-                                    # Capture Access-Control-Allow-Headers
                                     acah = response.headers.get('Access-Control-Allow-Headers', '')
                                     
                                     if self.args.debug:
@@ -269,44 +271,34 @@ class CORSScanner:
                                         cors_found = True
                                         is_vuln = False
                                         
-                                        # 1. Reflected Origin + ACAC
                                         if origin != "null" and origin != "*":
                                             if (origin in acao) and (acac == 'true'):
                                                 is_vuln = True
                                         
-                                        # 2. Null
                                         if origin == "null":
                                             if ('null' in acao or '*' in acao) and (acac == 'true'):
                                                 is_vuln = True
                                                 
-                                        # 3. Wildcard * + ACAC True
                                         if '*' == acao and acac == 'true':
                                             is_vuln = True
 
-                                        # 4. List injection
                                         if ',' in acao:
                                             parts = [p.strip() for p in acao.split(',')]
                                             if origin in parts and acac == 'true':
                                                 is_vuln = True
 
                                         if is_vuln:
-                                            # --- Default is to SKIP if ACAH is present ---
-                                            # Only include if --acah is provided.
-                                            
                                             if acah and not self.args.acah:
                                                 if self.args.debug:
-                                                    tqdm.write(f"{Fore.MAGENTA}[DEBUG] Ignored vuln due to ACAH presence (Default). Use --acah to include.")
-                                                is_vuln = False # Filtered out
+                                                    tqdm.write(f"{Fore.MAGENTA}[DEBUG] Ignored vuln due to ACAH presence (Default).")
+                                                is_vuln = False
                                             
                                             if is_vuln:
                                                 if self.args.debug:
                                                     tqdm.write(f"{Fore.RED}[DEBUG] >>> VULNERABILITY CONFIRMED <<<")
                                                 
-                                                # Pass ACAH to report function
                                                 await self.report_vulnerability(url, method, origin, acao, acac, acah)
                                                 VULNERABLE_DOMAINS.add(domain)
-                                                
-                                                # Stop methods loop for this origin
                                                 break 
                                 
                             except Exception as e:
@@ -315,41 +307,28 @@ class CORSScanner:
                                 continue
                         
                             if cors_found:
-                                break # Stop trying other methods for this Origin
+                                break
                         
-                        # Loop Logic:
-                        # If in default batch and vuln found, we stop defaults.
                         if batch_type == 'default' and domain in VULNERABLE_DOMAINS:
                             break
-                        
-                        # If in custom batch, we check specific custom logic.
-                        # Usually we want to test ALL custom origins provided by user, 
-                        # so we DO NOT break the loop here for 'custom'.
-                        # (Unless you want to stop after the first successful custom payload)
 
         if pbar: pbar.update(1)
 
     async def report_vulnerability(self, url, method, origin, acao, acac, acah):
         domain = get_domain_from_url(url)
-        
-        # --- DEDUPLICATION LOGIC ---
-        # We create a signature based on the Domain (not full URL), Origin, and Response headers.
-        # This prevents reporting the same vuln for http://site and https://site
         vuln_signature = (domain, origin, method, acao, acac, acah)
         
         if vuln_signature in REPORTED_SIGNATURES:
             if self.args.debug:
                 tqdm.write(f"{Fore.MAGENTA}[DEBUG] Duplicate finding suppressed for {domain} / {origin}")
-            return # Skip reporting
+            return
         
         REPORTED_SIGNATURES.add(vuln_signature)
         
-        # Format for silent/file
         clean_output = f"{url} | Method: {method} | ACAO: {acao}; ACAC: {acac}"
         if acah:
             clean_output += f"; ACAH: {acah}"
         
-        # Display Logic
         if self.args.silent:
             tqdm.write(clean_output)
         else:
@@ -363,7 +342,6 @@ class CORSScanner:
                 tqdm.write(f"{Fore.YELLOW}ACAH: {Fore.WHITE}{acah}")
             tqdm.write("-" * 50)
 
-        # File Output
         if self.args.output:
             async with aiofiles.open(self.args.output, 'a', encoding='utf-8') as f:
                 await f.write(clean_output + "\n")
@@ -393,7 +371,6 @@ class Crawler:
                     
             soup = BeautifulSoup(html, 'html.parser')
             
-            # Tags to extract
             tags = {
                 'a': 'href',
                 'script': 'src',
@@ -407,6 +384,13 @@ class Crawler:
                     val = element.get(attr)
                     if val:
                         full_url = urljoin(url, val)
+                        
+                        # Filter static assets
+                        if is_static_asset(full_url):
+                            if self.scanner.args.debug:
+                                tqdm.write(f"{Fore.MAGENTA}[DEBUG] Filtered static asset: {full_url}")
+                            continue
+                        
                         if get_domain_from_url(url) == get_domain_from_url(full_url):
                             normalized = normalize_url(full_url)
                             links.add(normalized)
@@ -434,13 +418,14 @@ class Crawler:
 
         for url in base_urls:
             endpoints = await self.extract_links(url)
+            # Root url here as well to ensure it's in the list, 
+            # but deduplication handles it later.
             all_endpoints.add(normalize_url(url))
             all_endpoints.update(endpoints)
             if progress: progress.update(1)
             
         if progress: progress.close()
 
-        # Save crawled output
         if self.scanner.args.output_crawl:
             async with aiofiles.open(self.scanner.args.output_crawl, 'w', encoding='utf-8') as f:
                 for link in all_endpoints:
@@ -517,8 +502,6 @@ async def main():
     bar_fmt = "{desc}: {percentage:3.0f}% | {n_fmt}/{total_fmt} targets"
 
     results = []
-    
-    # Resolve protocols async
     tasks = [scanner.get_smart_protocols(t) for t in raw_targets]
     if show_progress:
         for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Resolving Protocols", bar_format=bar_fmt):
@@ -534,27 +517,51 @@ async def main():
     if not args.silent:
         print(f"{Fore.GREEN}[+] {len(final_targets)} Live targets ready.{Style.RESET_ALL}")
 
-    # 3. Crawling (if enabled)
-    scan_list = final_targets
+    # --- PHASE 1: Scan ROOT Domains ---
+    # We always scan the roots first, before crawling.
+    if not args.silent:
+        print(f"{Fore.YELLOW}[*] Phase 1: Scanning {len(final_targets)} Root Targets...{Style.RESET_ALL}")
+    
+    pbar_root = None
+    if show_progress:
+        scan_bar_fmt = "{desc}: {percentage:3.0f}% | {n_fmt}/{total_fmt} Roots"
+        pbar_root = tqdm(total=len(final_targets), desc="Scanning Roots", unit="url", bar_format=scan_bar_fmt)
+
+    root_tasks = [scanner.scan_url(url, pbar_root) for url in final_targets]
+    await asyncio.gather(*root_tasks)
+    
+    if pbar_root:
+        pbar_root.close()
+
+    # --- PHASE 2: Crawling & Scanning Children ---
     if args.crawl:
         crawler = Crawler(scanner)
-        scan_list = await crawler.start(final_targets)
-
-    # 4. Scanning
-    if not args.silent:
-        print(f"{Fore.YELLOW}[*] Starting Scan on {len(scan_list)} endpoints...{Style.RESET_ALL}")
-
-    pbar = None
-    if show_progress:
-        scan_bar_fmt = "{desc}: {percentage:3.0f}% | {n_fmt}/{total_fmt} URLs"
-        pbar = tqdm(total=len(scan_list), desc="Scanning", unit="url", bar_format=scan_bar_fmt)
-
-    scan_tasks = [scanner.scan_url(url, pbar) for url in scan_list]
-    await asyncio.gather(*scan_tasks)
-    
-    if pbar:
-        pbar.close()
         
+        # Start crawling (using the verified roots)
+        all_crawled = await crawler.start(final_targets)
+        
+        # Filter: Only scan URLs that haven't been scanned in Phase 1
+        # (scanner.scan_url has internal dedup, but we filter here for accurate progress bars)
+        new_targets = [u for u in all_crawled if u not in SCANNED_URLS]
+        
+        if new_targets:
+            if not args.silent:
+                print(f"{Fore.YELLOW}[*] Phase 2: Scanning {len(new_targets)} Crawled Endpoints...{Style.RESET_ALL}")
+
+            pbar_crawl = None
+            if show_progress:
+                scan_bar_fmt = "{desc}: {percentage:3.0f}% | {n_fmt}/{total_fmt} URLs"
+                pbar_crawl = tqdm(total=len(new_targets), desc="Scanning Crawled", unit="url", bar_format=scan_bar_fmt)
+
+            crawl_tasks = [scanner.scan_url(url, pbar_crawl) for url in new_targets]
+            await asyncio.gather(*crawl_tasks)
+            
+            if pbar_crawl:
+                pbar_crawl.close()
+        else:
+             if not args.silent:
+                print(f"{Fore.CYAN}[*] No new unique endpoints found to scan.{Style.RESET_ALL}")
+
     if not args.silent:
         print(f"\n{Fore.CYAN}Scan Complete.{Style.RESET_ALL}")
 
@@ -565,5 +572,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print(f"\n{Fore.YELLOW}[!] Please wait for shutting down...{Style.RESET_ALL}")
-        # Cleanly exiting
         sys.exit(0)
